@@ -1,0 +1,101 @@
+
+#include <cxxtest/TestSuite.h>
+#include <opencog/attention/AFRentCollectionAgent.h>
+#include <opencog/cogserver/modules/agents/Scheduler.h>
+#include <opencog/cogserver/server/CogServer.h>
+#include <opencog/attentionbank/bank/AttentionBank.h>
+#include <opencog/attentionbank/avalue/AttentionValue.h>
+#include <opencog/atomspace/AtomSpace.h>
+#include <opencog/util/Config.h>
+#include <opencog/cogserver/modules/agents/AgentsModule.h>
+#include <opencog/attention/AttentionParamQuery.h>
+#include <chrono>
+#include <vector>
+#include <iostream>
+#include <fstream>
+
+using namespace opencog;
+
+class RentCollectionLargeUTest : public CxxTest::TestSuite
+{
+private:
+    AtomSpace* as;
+    AFRentCollectionAgent* _afrentcollection_agent;
+    CogServer* _cogserver;
+    Scheduler* _scheduler;
+
+public:
+    void setUp()
+    {
+        _cogserver = &cogserver();
+        config().set("MODULES", "opencog/attention/libattention.so");
+        _cogserver->loadModules();
+        config().set("MODULES", "libagents.so");
+
+        Module* amod = _cogserver->getModule("opencog::AgentsModule");
+        AgentsModule* agmod = static_cast<AgentsModule*>(amod);
+
+        as = &_cogserver->getAtomSpace();
+
+        _afrentcollection_agent = new AFRentCollectionAgent(*_cogserver);
+
+        _scheduler = &agmod->get_scheduler();
+        AbstractFactory<Agent>* afrentcollectionFactory = new Factory<AFRentCollectionAgent, Agent>;
+        _scheduler->registerAgent(AFRentCollectionAgent::info().id, afrentcollectionFactory);
+
+        // Load default values to ensure AttentionBank is configured
+        AttentionParamQuery atq(as);
+        atq.load_default_values();
+
+        std::cout << "Setup completed for RentCollectionLargeUTest." << std::endl;
+    }
+
+    void tearDown()
+    {
+        delete _afrentcollection_agent;
+        _cogserver->stop();
+        std::cout << "TearDown completed for RentCollectionLargeUTest." << std::endl;
+    }
+
+    void testAFRentScaling()
+    {
+        AttentionBank& ab = attentionbank(as);
+        
+        // 1. Scale AF to 1000
+        ab.set_af_size(100);
+
+        // 2. Create 1000 atoms and stimulate them high
+        int atomCount = 1000;
+        for (int i = 0; i < atomCount; ++i) {
+            Handle h = as->add_node(CONCEPT_NODE, "ScaleNode_" + std::to_string(i));
+            ab.stimulate(h, 300.0); // Sufficient to enter AF
+        }
+        _afrentcollection_agent->run();
+        // Wait for setup to settle
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        // 3. Benchmark Rent Collection
+        // We measure only the active work time of run(), excluding the sleeps
+        int runCount = 1;
+        std::chrono::nanoseconds total_work_time(0);
+        
+        for (int i = 0; i < runCount; ++i) {
+            // Sleep to satisfy the frequency check in AFRentCollectionAgent (default 5Hz = 200ms)
+            // This ensures each cycle actually performs rent collection arithmetic.
+            std::this_thread::sleep_for(std::chrono::milliseconds(210)); 
+
+            auto start_run = std::chrono::high_resolution_clock::now();
+            _afrentcollection_agent->run();
+            auto end_run = std::chrono::high_resolution_clock::now();
+            
+            total_work_time += std::chrono::duration_cast<std::chrono::nanoseconds>(end_run - start_run);
+        }
+        
+        double total_seconds = std::chrono::duration<double>(total_work_time).count();
+        
+        std::cout << "Benchmark Finished." << std::endl;
+        std::cout << "Processed " << runCount << " active cycles with 1000 atoms in AF." << std::endl;
+        std::cout << "Total execution time (excluding sleeps): " << total_seconds << " seconds." << std::endl;
+        std::cout << "Average execution time per active cycle: " << (total_seconds / runCount) << " seconds." << std::endl;
+    }
+};
